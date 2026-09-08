@@ -24,8 +24,18 @@ output/
 dataset/
 videos/
 models/
-database/*.db
+database/
 *.sqlite3
+
+# Local env and IDE
+.env
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Docs
+*.md
 
 # Large model artifacts and archives
 **/*.onnx
