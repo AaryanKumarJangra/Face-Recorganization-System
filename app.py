@@ -8,6 +8,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
+import cv2
+import base64
 
 from utils.config_loader import Config
 from utils.path_manager import PathManager
@@ -29,6 +31,7 @@ DELETE_OUTPUT_AFTER_PROCESS = os.getenv("DELETE_OUTPUT_AFTER_PROCESS", "1") == "
 # NOTE: if you scale to multiple Render instances, or need jobs to
 # survive a restart, replace this with Redis or a database table.
 JOBS: dict[str, dict] = {}
+JOBS_FACE: dict[str, dict] = {}
 
 # Loaded once at startup, reused across requests (matches how main.py's
 # batch mode avoids reloading the detector/classifier per video).
@@ -105,6 +108,59 @@ def _run_recognition_job(job_id: str, video_url: str):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+class ProcessURLRequest(BaseModel):
+    url: str
+
+
+def _run_face_extraction_job(video_url: str, job_id: str):
+    JOBS_FACE[job_id] = {"status": "downloading", "results": []}
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"facejob_{job_id}_"))
+    try:
+        video_path = _download_video(video_url, tmp_dir)
+        JOBS_FACE[job_id]["status"] = "processing"
+
+        # Lazy-load the detector so environments that don't install insightface
+        # still can run other endpoints.
+        from detection.face_detector import FaceDetector
+
+        cfg = Config(CONFIG_PATH)
+        paths = PathManager(root_dir=cfg.project.root_dir)
+        detector = FaceDetector(cfg, paths)
+
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_idx = 0
+        results = []
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            faces = detector.detect(frame)
+            for det in faces:
+                crop = det.crop(frame)
+                _, buf = cv2.imencode('.jpg', crop)
+                b64_img = base64.b64encode(buf.tobytes()).decode('utf-8')
+                timestamp_sec = frame_idx / fps
+                results.append({
+                    "image": f"data:image/jpeg;base64,{b64_img}",
+                    "timestamp": round(timestamp_sec, 2),
+                })
+
+            frame_idx += 1
+
+        cap.release()
+        JOBS_FACE[job_id] = {"status": "done", "results": results}
+
+    except Exception as exc:
+        logger.exception("Face extraction job %s failed", job_id)
+        JOBS_FACE[job_id] = {"status": "error", "message": str(exc)}
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 @app.get("/")
 def health_check():
     return {"status": "running"}
@@ -125,6 +181,22 @@ def recognize(request: RecognizeRequest, background_tasks: BackgroundTasks):
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
     job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/process-url")
+def process_url(req: ProcessURLRequest, background_tasks: BackgroundTasks):
+    job_id = uuid.uuid4().hex
+    JOBS_FACE[job_id] = {"status": "queued", "results": []}
+    background_tasks.add_task(_run_face_extraction_job, req.url, job_id)
+    return {"job_id": job_id}
+
+
+@app.get("/status/{job_id}")
+def status(job_id: str):
+    job = JOBS_FACE.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job

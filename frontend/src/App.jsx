@@ -13,11 +13,15 @@ export default function App() {
     if (jobId) {
       polling.current = setInterval(async () => {
         try {
-          const res = await fetch(`${API_BASE}/jobs/${jobId}`)
+          const res = await fetch(`${API_BASE}/status/${jobId}`)
           if (!res.ok) throw new Error('Failed to fetch job')
           const data = await res.json()
           setJob(data)
-          if (data.status === 'done' || data.status === 'failed') {
+          if (data.status === 'done') {
+            setResults(data.results || [])
+            clearInterval(polling.current)
+          } else if (data.status === 'error') {
+            setError(data.message || 'error')
             clearInterval(polling.current)
           }
         } catch (err) {
@@ -34,10 +38,10 @@ export default function App() {
     setJob(null)
     setJobId(null)
     try {
-      const res = await fetch(`${API_BASE}/recognize`, {
+      const res = await fetch(`${API_BASE}/process-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_url: url })
+        body: JSON.stringify({ url })
       })
       if (!res.ok) throw new Error('Failed to start job')
       const data = await res.json()
@@ -66,7 +70,20 @@ export default function App() {
       {job && (
         <div className="job">
           <h3>Job Status: {job.status}</h3>
-          <pre>{JSON.stringify(job, null, 2)}</pre>
+        </div>
+      )}
+
+      {results && results.length > 0 && (
+        <div>
+          <h3>Detected faces</h3>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            {results.map((r, i) => (
+              <div key={i} style={{ textAlign: 'center' }}>
+                <img src={r.image} alt={`face-${i}`} width={120} />
+                <div>{r.timestamp}s</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
