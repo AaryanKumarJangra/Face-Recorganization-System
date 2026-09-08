@@ -1,0 +1,10 @@
+.container {
+  max-width: 760px;
+  margin: 40px auto;
+  font-family: Inter, Arial, sans-serif;
+}
+.form { display:flex; gap:8px; margin-bottom:12px }
+input { flex:1; padding:8px 10px; font-size:14px }
+button { padding:8px 12px }
+.error { color: #b00020; margin:8px 0 }
+.job pre { background:#f6f8fa; padding:8px; overflow:auto }
