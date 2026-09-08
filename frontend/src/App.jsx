@@ -6,6 +6,7 @@ export default function App() {
   const [url, setUrl] = useState('')
   const [jobId, setJobId] = useState(null)
   const [job, setJob] = useState(null)
+  const [results, setResults] = useState([])
   const [error, setError] = useState(null)
   const polling = useRef(null)
 
