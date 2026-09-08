@@ -11,12 +11,18 @@ import requests
 from utils.config_loader import Config
 from utils.path_manager import PathManager
 from utils.logger import get_logger
+import os
 
 logger = get_logger(__name__, log_filename="api.log")
 
 app = FastAPI(title="FaceRecognitionSystem API")
 
 CONFIG_PATH = "configs/config.yaml"
+
+# When set to '1', the API will remove the processed `output_path`
+# returned by the pipeline immediately after processing finishes.
+# Default: enabled (1) to save disk space on constrained hosts.
+DELETE_OUTPUT_AFTER_PROCESS = os.getenv("DELETE_OUTPUT_AFTER_PROCESS", "1") == "1"
 
 # In-memory job store. Fine for a single instance / demo use.
 # NOTE: if you scale to multiple Render instances, or need jobs to
@@ -78,6 +84,15 @@ def _run_recognition_job(job_id: str, video_url: str):
 
         JOBS[job_id]["status"] = "done"
         JOBS[job_id]["output_path"] = output_path
+
+        if DELETE_OUTPUT_AFTER_PROCESS and output_path:
+            try:
+                # remove output file to free disk
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                    JOBS[job_id]["output_removed"] = True
+            except Exception:
+                logger.exception("Failed to remove output for job %s", job_id)
 
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
