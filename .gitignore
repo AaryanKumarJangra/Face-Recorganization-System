@@ -1,0 +1,37 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# IDE/editor settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime and local data
+logs/
+output/
+dataset/
+videos/
+models/
+database/*.db
+*.sqlite3
+
+# Large model artifacts and archives
+**/*.onnx
+**/*.zip
+**/*.pt
+**/*.bin
+
+# Notebook files
+.ipynb_checkpoints/

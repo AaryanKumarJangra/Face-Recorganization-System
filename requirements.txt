@@ -1,0 +1,57 @@
+# =============================================================================
+# FaceRecognitionSystem — Dependencies
+# Tested compatibility set for Python 3.12
+# =============================================================================
+
+# --- Core numerical / config ---
+numpy==1.26.4                 # Python 3.12 target. On Python 3.13, use numpy==2.1.3 instead
+PyYAML==6.0.2
+
+# --- Computer Vision ---
+# HEADLESS variants used deliberately: this project never opens a GUI
+# window (cv2.imshow etc. are not used anywhere), so headless avoids
+# needing libGL/Qt system packages — important for VMware/server/minimal
+# Linux VMs where those aren't installed by default. If you ever add
+# cv2.imshow() for live preview, switch back to the non-headless packages
+# and install the system GUI dependencies (see VM setup notes in README).
+opencv-python-headless==4.10.0.84
+opencv-contrib-python-headless==4.10.0.84
+
+# --- Deep Learning ---
+torch==2.4.1
+torchvision==0.19.1
+
+# --- Face Detection / Embeddings ---
+# InsightFace (RetinaFace detector + ArcFace embedder). This is the ONLY
+# face detector used in this project. The old OpenCV DNN Caffe detector
+# (deploy.prototxt + res10_300x300_ssd_iter_140000.caffemodel) has been
+# fully removed — no Caffe files or cv2.dnn.readNetFromCaffe calls exist
+# anywhere in this codebase.
+insightface==0.7.3
+onnx==1.16.2
+onnxruntime==1.19.2          # swap for onnxruntime-gpu if CUDA is available
+# onnxruntime-gpu==1.19.2     # <- uncomment on CUDA machines, comment out the CPU line above
+
+# --- Object Detection (optional YOLO backend, not required by default) ---
+ultralytics==8.2.103
+
+# --- Tracking ---
+# NOTE: our ByteTrack-style tracker (tracking/face_tracker.py) is
+# implemented in pure Python/NumPy, so the original ByteTrack repo's
+# `lap` / `cython-bbox` C-extension dependencies are NOT required — this
+# avoids needing a C compiler on Windows.
+
+# --- Classical ML (Phase 6 classifiers) ---
+scikit-learn==1.5.1
+scipy==1.13.1
+
+# --- Storage ---
+# sqlite3 ships with the Python standard library — no install needed.
+
+# --- Utilities ---
+tqdm==4.66.5
+pandas==2.2.2
+Pillow==10.4.0                # used by utils/augmentation.py for JPEG-compression simulation
+
+# --- Logging / dev quality-of-life ---
+python-dotenv==1.0.1

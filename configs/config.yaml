@@ -1,0 +1,190 @@
+# =============================================================================
+# FaceRecognitionSystem — Master Configuration
+# =============================================================================
+# Every module in this project reads its parameters from here.
+# Do NOT hardcode paths or thresholds inside module code — add them here
+# and read them through utils.config_loader.Config instead.
+# =============================================================================
+
+project:
+  name: "FaceRecognitionSystem"
+  root_dir: "."          # resolved to an absolute path at runtime by PathManager
+
+# -----------------------------------------------------------------------
+# Hardware / execution device
+# -----------------------------------------------------------------------
+device:
+  # "auto" -> use CUDA if torch.cuda.is_available(), else CPU
+  # "cuda" -> force GPU (raises an error if unavailable)
+  # "cpu"  -> force CPU
+  mode: "auto"
+  gpu_id: 0
+
+# -----------------------------------------------------------------------
+# Phase 1-2: Detection & Tracking
+# -----------------------------------------------------------------------
+detection:
+  # ONLY InsightFace RetinaFace is supported. The old OpenCV DNN Caffe
+  # detector (deploy.prototxt + res10_300x300_ssd_iter_140000.caffemodel)
+  # has been fully removed from this project — no Caffe files are used
+  # or required anywhere in the pipeline.
+  backend: "insightface_retinaface"
+  # SPEED: buffalo_s (SCRFD-500MF detector + MobileFaceNet recognition) is
+  # ~4-5x faster than buffalo_l with only a modest accuracy trade-off —
+  # measured 53.7fps vs buffalo_l's much slower throughput on CPU, at
+  # det_size 320x320. Switch back to "buffalo_l" if you have a real GPU
+  # or need maximum accuracy on very hard/low-quality faces and speed
+  # isn't the priority.
+  model_pack: "buffalo_s"
+  confidence_threshold: 0.65    # raised from 0.5 — real-world footage (doorframes, textures,
+                                 # shadows) can trigger low-confidence false positives below this
+  # Minimum face bounding box side length (pixels). Raised from 20 — very
+  # tiny "faces" are usually false positives on real CCTV-style footage,
+  # not genuine faces worth keeping.
+  min_face_size: 35
+  nms_threshold: 0.4
+  ctx_id: -1                    # -1 = CPU, 0 = first GPU (overridden by device.mode at runtime)
+  # SPEED: 320x320 instead of 640x640 — measured ~2x faster with minimal
+  # accuracy loss for CCTV-scale faces (which are usually small anyway,
+  # so a huge detector input resolution wasn't buying much). Try 640x640
+  # if you're missing genuinely large/close-up faces.
+  det_size: [320, 320]
+
+  # Multi-pass detection for LOW-QUALITY video: runs detection multiple
+  # times on enhanced versions of the same frame (contrast boost, upscale)
+  # and merges results, so faces aren't missed due to darkness/blur/small
+  # size. This is NOT multiple different models — it's the same RetinaFace
+  # model run on different preprocessed versions of one frame, with
+  # IoU-based de-duplication so it doesn't create duplicate detections.
+  # Costs ~3x detection time per frame. DISABLED by default now that
+  # buffalo_s + det_size 320 is fast enough to process every frame without
+  # skipping — re-enable if you still miss faces in very dark/blurry footage.
+  multi_pass:
+    enabled: false
+    upscale_factor: 1.5
+
+tracking:
+  backend: "bytetrack"
+  track_thresh: 0.5        # detection confidence threshold to start a track
+  track_buffer: 60         # frames to keep a "lost" track alive (short-term disappearance)
+  match_thresh: 0.3         # IoU threshold for associating detections to tracks.
+                             # Lowered from 0.8 — that was unrealistically strict for
+                             # real footage with normal motion/face-size change, causing
+                             # constant track breaks that then had to be repaired by
+                             # re-ID (and sometimes weren't, causing ID fragmentation).
+  frame_rate: 30           # expected video FPS, used for buffer-to-time conversion
+
+  # Re-identification layer: handles the case where ByteTrack's track_buffer
+  # has already expired (person was gone too long) by comparing the new
+  # track's face embedding against a gallery of embeddings from all past
+  # tracks in this video, and re-assigning the same person ID if matched.
+  reid:
+    enabled: true
+    similarity_threshold: 0.45   # cosine similarity to re-link a new track to a past ID
+    gallery_embeddings_per_id: 10  # how many past embeddings per ID to keep for matching
+
+# -----------------------------------------------------------------------
+# Phase 3-4: Dataset generation & quality filtering
+# -----------------------------------------------------------------------
+dataset:
+  output_dir: "dataset"
+  # BEST_FACE_ONLY = true (new default): for each person, only ONE image
+  # is saved — the highest composite-quality crop seen across the whole
+  # video (see utils.quality.composite_quality_score). Every frame is
+  # still evaluated internally as the video is processed, but only the
+  # best one is written to disk per person, so dataset/person_XXXX/
+  # ends up with exactly 1 image, not dozens of near-duplicate frames.
+  #
+  # Set to false to go back to saving EVERY detected face crop instead
+  # (useful if you want more training images per person later, or want
+  # to review borderline detections yourself).
+  best_face_only: true
+  save_all_faces: false            # only used when best_face_only is false
+  images_per_person_target: null   # null = no cap when save_all_faces is true
+  save_every_n_frames: 1
+  exact_duplicate_check: true
+
+quality_filters:
+  # These filters no longer control whether an image is SAVED — they only
+  # compute and store a quality score/tag alongside each saved image in
+  # faces.db (columns: is_blurry, brightness_ok, pose_ok, is_low_res).
+  # This lets Phase 6 training optionally exclude low-quality images later
+  # without having thrown the data away at collection time.
+  blur:
+    enabled: true
+    laplacian_var_threshold: 100.0
+  brightness:
+    enabled: true
+    min_mean_intensity: 40
+    max_mean_intensity: 220
+  min_resolution:
+    width: 20
+    height: 20
+  pose:
+    enabled: true
+    max_yaw_degrees: 90               # effectively "always ok" — informational only
+    max_pitch_degrees: 90
+  duplicate_check:
+    enabled: false                    # disabled: save_all_faces means embedding-similar frames are kept too
+
+# -----------------------------------------------------------------------
+# Phase 5: Embeddings
+# -----------------------------------------------------------------------
+embedding:
+  backend: "insightface"          # "insightface" or "facenet"
+  model_pack: "buffalo_s"         # kept in sync with detection.model_pack above (informational —
+                                   # the actual model used is whatever detection.model_pack loads)
+  embedding_size: 512
+  save_formats: ["numpy", "pickle", "sqlite"]
+
+# -----------------------------------------------------------------------
+# Phase 6: Training
+# -----------------------------------------------------------------------
+training:
+  methods: ["svm", "knn"]         # methods to train and compare
+  svm:
+    kernel: "linear"
+    probability: true
+    C: 1.0
+  knn:
+    n_neighbors: 5
+    metric: "cosine"
+  test_split: 0.2
+  random_seed: 42
+
+# -----------------------------------------------------------------------
+# Phase 7: Recognition
+# -----------------------------------------------------------------------
+recognition:
+  similarity_threshold: 0.55      # below this -> label as "Unknown"
+  unknown_label: "Unknown"
+  display:
+    show_bbox: true
+    show_name: true
+    show_confidence: true
+    show_track_id: true
+    show_fps: true
+
+# -----------------------------------------------------------------------
+# Batch / performance
+# -----------------------------------------------------------------------
+performance:
+  batch_size: 8
+  num_workers: 4
+  use_multiprocessing: true
+  # SPEED LEVER: only run detection every N frames instead of every
+  # single frame. Set to 1 (default now) to process EVERY frame — with
+  # buffalo_s + det_size 320 + multi_pass disabled, per-frame detection
+  # is now fast enough (measured 53.7fps) that skipping frames usually
+  # isn't necessary. Raise this (e.g. 2-3) only if you're still too slow
+  # after trying a GPU / more CPU cores.
+  frame_skip: 1
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  log_dir: "logs"
+  level: "INFO"                   # DEBUG, INFO, WARNING, ERROR
+  log_to_console: true
+  log_to_file: true
