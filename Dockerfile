@@ -4,7 +4,11 @@ WORKDIR /work/frontend
 
 # copy only what is needed for install first to leverage caching
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --no-optional --no-audit --prefer-offline || npm install
+# Install dependencies. Do not skip optional packages — rollup may require
+# an optional native binary during the Vite build, so `--no-optional` breaks
+# production builds on some platforms. Use `--no-audit` and prefer offline
+# caching for speed.
+RUN npm install --no-audit --prefer-offline
 COPY frontend/ ./
 RUN npm run build
 
