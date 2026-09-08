@@ -161,8 +161,8 @@ def _run_face_extraction_job(video_url: str, job_id: str):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@app.get("/")
-def health_check():
+@app.get("/api/health")
+def health():
     return {"status": "running"}
 
 
