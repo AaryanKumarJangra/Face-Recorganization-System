@@ -9,7 +9,6 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
-import cv2
 import base64
 
 from utils.config_loader import Config
@@ -130,6 +129,9 @@ class ProcessURLRequest(BaseModel):
 
 
 def _run_face_extraction_job(video_url: str, job_id: str):
+    # import heavy optional deps lazily so the API can start in dev
+    # environments that don't have CV/ML packages installed.
+    import cv2
     JOBS_FACE[job_id] = {"status": "downloading", "results": []}
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"facejob_{job_id}_"))
     try:
