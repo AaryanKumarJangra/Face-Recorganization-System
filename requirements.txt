@@ -55,3 +55,7 @@ Pillow==10.4.0                # used by utils/augmentation.py for JPEG-compressi
 
 # --- Logging / dev quality-of-life ---
 python-dotenv==1.0.1
+
+# Web API
+fastapi==0.100.0
+uvicorn[standard]==0.23.2
