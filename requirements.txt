@@ -59,3 +59,4 @@ python-dotenv==1.0.1
 # Web API
 fastapi==0.100.0
 uvicorn[standard]==0.23.2
+requests==2.31.0
