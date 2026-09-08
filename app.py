@@ -1,5 +1,6 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import uuid
@@ -19,6 +20,22 @@ import os
 logger = get_logger(__name__, log_filename="api.log")
 
 app = FastAPI(title="FaceRecognitionSystem API")
+
+# CORS: allow local frontend dev server by default. Override via
+# CORS_ORIGINS env var (comma-separated) in production if needed.
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+try:
+    origins = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+except Exception:
+    origins = ["http://localhost:5173"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 CONFIG_PATH = "configs/config.yaml"
 
