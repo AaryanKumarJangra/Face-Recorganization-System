@@ -1,4 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import uuid
@@ -127,4 +128,14 @@ def get_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+# Serve the built React frontend (if present) from frontend/dist. Placed
+# after API route definitions so API endpoints keep precedence.
+try:
+    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+except Exception:
+    # If the build directory doesn't exist in this environment, mounting
+    # will be a no-op; the API still works.
+    logger.info("frontend/dist not found; static mount skipped")
  
