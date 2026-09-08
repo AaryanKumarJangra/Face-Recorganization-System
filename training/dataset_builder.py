@@ -239,25 +239,26 @@ class DatasetBuilder:
     def _save_best_face_observation(self, tracked_face, crop, crop_landmarks, quality, score, video_path, frame_number) -> int:
         person_id = tracked_face.person_id
         df = tracked_face.detected_face
-
-        person_dir = self.paths.get_person_dir(person_id)
-        ts_str = self._frame_timestamp_str(frame_number)
-        best_image_name = f"best_face_{ts_str}.jpg" if ts_str else "best_face.jpg"
-        best_image_path = person_dir / best_image_name
-
+        # When storing images in the DB, we don't write files to disk.
         current_best = self._best_face_scores.get(person_id)
         is_new_best = current_best is None or score > current_best
 
-        image_path_to_log = str(best_image_path) if is_new_best else str(
-            self._best_face_paths.get(person_id, best_image_path)
-        )
-        # Always log the observation (embedding) for training purposes,
-        # even if it's not the new best — image_path just points at
-        # wherever the current best file lives/will live.
+        # If this is the new best, encode the image to JPEG bytes and store
+        # it in the database; otherwise just log the observation pointing at
+        # wherever the current best lives (a db://... URI) if available.
+        existing_best_path = self._best_face_paths.get(person_id)
+        image_path_to_log = existing_best_path if not is_new_best else None
+
+        image_blob = None
+        if is_new_best:
+            ok, buf = cv2.imencode('.jpg', crop)
+            image_blob = buf.tobytes() if ok else None
+
         row_id = self.faces_db.insert_face(
             person_id=person_id,
             track_id=tracked_face.track_id,
             image_path=image_path_to_log,
+            image_blob=image_blob,
             source_video=video_path,
             frame_number=frame_number,
             confidence=df.confidence,
@@ -273,22 +274,17 @@ class DatasetBuilder:
             is_low_res=quality.is_low_res,
             width=quality.width,
             height=quality.height,
-            is_best_face=is_new_best,
+            is_best_face=False,
             landmarks=crop_landmarks,
         )
 
         if is_new_best:
-            # Remove the previous best-face file (it had the OLD frame's
-            # timestamp baked into its name) before writing the new one.
-            old_path = self._best_face_paths.get(person_id)
-            if old_path is not None and old_path != best_image_path and old_path.exists():
-                old_path.unlink()
-
-            cv2.imwrite(str(best_image_path), crop)
+            # Mark this row as the best face for this person. Use a db://<id>
+            # pseudo-path so other code that expects a path string still works.
             self.faces_db.clear_best_face_flag(person_id)
-            self.faces_db.mark_best_face(row_id, str(best_image_path))
+            self.faces_db.mark_best_face(row_id, f"db://{row_id}")
             self._best_face_scores[person_id] = score
-            self._best_face_paths[person_id] = best_image_path
+            self._best_face_paths[person_id] = f"db://{row_id}"
             return 1
         return 0
 
@@ -299,31 +295,18 @@ class DatasetBuilder:
         person_id = tracked_face.person_id
         score = composite_quality_score(quality, df.confidence, df.yaw, df.pitch)
 
-        person_dir = self.paths.get_person_dir(person_id)
+        # Store every frame's crop directly in the database as a blob
         idx = self._image_counters.get(person_id, 0) + 1
         self._image_counters[person_id] = idx
 
-        video_stem = Path(video_path).stem
-        ts_str = self._frame_timestamp_str(frame_number)
-        if ts_str:
-            filename = f"{person_id}_{video_stem}_track{tracked_face.track_id}_{ts_str}_{idx:04d}.jpg"
-        else:
-            filename = f"{person_id}_{video_stem}_track{tracked_face.track_id}_frame{frame_number:06d}_{idx:04d}.jpg"
-        image_path = person_dir / filename
-
-        suffix = 0
-        final_path = image_path
-        while final_path.exists():
-            suffix += 1
-            final_path = image_path.with_name(f"{image_path.stem}_{suffix}{image_path.suffix}")
-        image_path = final_path
-
-        cv2.imwrite(str(image_path), crop)
+        ok, buf = cv2.imencode('.jpg', crop)
+        image_blob = buf.tobytes() if ok else None
 
         self.faces_db.insert_face(
             person_id=person_id,
             track_id=tracked_face.track_id,
-            image_path=str(image_path),
+            image_path=None,
+            image_blob=image_blob,
             source_video=video_path,
             frame_number=frame_number,
             confidence=df.confidence,
@@ -351,34 +334,9 @@ class DatasetBuilder:
         visual review of everyone detected, without opening each
         person_XXXX/ subfolder individually.
         """
-        import shutil
-
-        gallery_dir = self.paths.dataset_dir / "bestfaces"
-        gallery_dir.mkdir(parents=True, exist_ok=True)
-
-        count = 0
-        for person_dir in sorted(self.paths.dataset_dir.iterdir()):
-            if not person_dir.is_dir() or person_dir.name in ("unknown", "bestfaces"):
-                continue
-            # Filename is now "best_face.jpg" (no timestamp available) or
-            # "best_face_<YYYYMMDD_HHMMSS>.jpg" (timestamp available) —
-            # there's only ever one such file per person.
-            matches = sorted(person_dir.glob("best_face*.jpg"))
-            if matches:
-                shutil.copy2(matches[0], gallery_dir / f"{person_dir.name}.jpg")
-                count += 1
-
-        logger.info("Built bestfaces gallery: %d images in %s", count, gallery_dir)
+        # Best-face gallery export skipped: images are stored in SQLite
+        logger.info("Skipping bestfaces gallery creation; images stored in DB")
 
     def _write_metadata_summary(self, summary: dict) -> None:
-        meta_path = self.paths.metadata_json_file()
-        existing = []
-        if meta_path.exists():
-            try:
-                existing = json.loads(meta_path.read_text(encoding="utf-8"))
-                if not isinstance(existing, list):
-                    existing = [existing]
-            except (json.JSONDecodeError, OSError):
-                existing = []
-        existing.append(summary)
-        meta_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        # Metadata storage disabled per user preference.
+        return

@@ -94,7 +94,8 @@ class FacesDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     person_id TEXT NOT NULL,
                     track_id INTEGER NOT NULL,
-                    image_path TEXT NOT NULL,
+                    image_path TEXT,
+                    image_blob BLOB,
                     source_video TEXT,
                     frame_number INTEGER,
                     confidence REAL,
@@ -116,17 +117,26 @@ class FacesDatabase:
                 )
                 """
             )
+            # Ensure legacy DBs get the new image_blob column if missing
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(faces)").fetchall()]
+            if "image_blob" not in cols:
+                try:
+                    conn.execute("ALTER TABLE faces ADD COLUMN image_blob BLOB")
+                except sqlite3.OperationalError:
+                    # If table doesn't exist yet or column already present, ignore
+                    pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id)")
 
     def insert_face(
         self,
         person_id: str,
         track_id: int,
-        image_path: str,
+        image_path: str | None,
+        image_blob: bytes | None,
         source_video: str,
         frame_number: int,
         confidence: float,
-        embedding: "np.ndarray",
+        embedding: "np.ndarray | None",
         quality_score: float,
         is_blurry: bool,
         laplacian_var: float,
@@ -143,24 +153,46 @@ class FacesDatabase:
     ) -> int:
         """Insert one face OBSERVATION record (not necessarily saved to disk). Returns the new row id."""
         landmarks_blob = landmarks.astype("float32").tobytes() if landmarks is not None else None
+        embedding_blob = embedding.astype("float32").tobytes() if embedding is not None else None
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO faces (
                     person_id, track_id, image_path, source_video, frame_number,
                     confidence, embedding, landmarks, quality_score, is_blurry, laplacian_var, brightness_ok,
-                    mean_brightness, pose_ok, yaw, pitch, is_low_res, width, height, is_best_face
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mean_brightness, pose_ok, yaw, pitch, is_low_res, width, height, is_best_face, image_blob
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    person_id, track_id, image_path, source_video, frame_number,
-                    confidence, embedding.astype("float32").tobytes(), landmarks_blob, quality_score,
-                    int(is_blurry), laplacian_var, int(brightness_ok),
-                    mean_brightness, int(pose_ok), yaw, pitch, int(is_low_res), width, height,
+                    person_id,
+                    track_id,
+                    image_path or None,
+                    source_video,
+                    frame_number,
+                    confidence,
+                    embedding_blob,
+                    landmarks_blob,
+                    quality_score,
+                    int(is_blurry),
+                    laplacian_var,
+                    int(brightness_ok),
+                    mean_brightness,
+                    int(pose_ok),
+                    yaw,
+                    pitch,
+                    int(is_low_res),
+                    width,
+                    height,
                     int(is_best_face),
+                    image_blob,
                 ),
             )
-            return cursor.lastrowid
+            row_id = cursor.lastrowid
+            # If an image blob was provided but no explicit image_path, point
+            # image_path at the DB row (db://<id>) for callers that expect a path string.
+            if image_blob is not None and not image_path:
+                conn.execute("UPDATE faces SET image_path = ? WHERE id = ?", (f"db://{row_id}", row_id))
+            return row_id
 
     def clear_best_face_flag(self, person_id: str) -> None:
         """Unmark any previous best-face row for this person (used when a better one is found)."""
@@ -174,6 +206,12 @@ class FacesDatabase:
                 "UPDATE faces SET is_best_face = 1, image_path = ? WHERE id = ?",
                 (image_path, row_id),
             )
+
+    def get_image_blob(self, row_id: int) -> Optional[bytes]:
+        """Retrieve the stored image blob for a given row id, or None."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT image_blob FROM faces WHERE id = ?", (row_id,)).fetchone()
+            return row["image_blob"] if row is not None else None
 
     def get_best_faces(self):
         """Returns rows marked as the saved best face for each person."""

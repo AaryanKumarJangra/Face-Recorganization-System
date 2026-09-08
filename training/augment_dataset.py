@@ -87,10 +87,24 @@ class DatasetAugmenter:
                 )
                 continue
 
-            crop = cv2.imread(image_path)
-            if crop is None:
-                logger.warning("Could not read %s for %s — skipping.", image_path, person_id)
-                continue
+            crop = None
+            if image_path and str(image_path).startswith("db://"):
+                # Load image bytes from DB
+                row_id = int(str(image_path).split("db://", 1)[1])
+                blob = self.faces_db.get_image_blob(row_id)
+                if blob is None:
+                    logger.warning("No image blob for %s (%s) — skipping.", person_id, image_path)
+                    continue
+                arr = np.frombuffer(blob, dtype=np.uint8)
+                crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if crop is None:
+                    logger.warning("Could not decode image blob for %s — skipping.", person_id)
+                    continue
+            else:
+                crop = cv2.imread(image_path)
+                if crop is None:
+                    logger.warning("Could not read %s for %s — skipping.", image_path, person_id)
+                    continue
 
             landmarks = np.frombuffer(landmarks_blob, dtype=np.float32).reshape(5, 2)
 
