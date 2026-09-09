@@ -9,11 +9,14 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 import base64
+import json
+import sqlite3
 
 import yt_dlp
 
 from utils.config_loader import Config
 from utils.path_manager import PathManager
+from utils.database import FacesDatabase
 from utils.logger import get_logger
 import os
 
@@ -49,6 +52,50 @@ DELETE_OUTPUT_AFTER_PROCESS = os.getenv("DELETE_OUTPUT_AFTER_PROCESS", "1") == "
 # survive a restart, replace this with Redis or a database table.
 JOBS: dict[str, dict] = {}
 JOBS_FACE: dict[str, dict] = {}
+
+_JOB_DB_PATH = Path(__file__).resolve().parent / "database" / "jobs.db"
+
+
+def _init_job_store() -> None:
+    """SQLite-backed job status store so polls keep working across app restarts."""
+    _JOB_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(_JOB_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_status (
+                job_id TEXT PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+
+def _save_job_state(job_id: str, job_type: str, payload: dict) -> None:
+    _init_job_store()
+    with sqlite3.connect(_JOB_DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO job_status(job_id, job_type, payload) VALUES(?, ?, ?) "
+            "ON CONFLICT(job_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP",
+            (job_id, job_type, json.dumps(payload)),
+        )
+
+
+def _load_job_state(job_id: str) -> dict | None:
+    _init_job_store()
+    with sqlite3.connect(_JOB_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT payload FROM job_status WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+
 
 # Loaded once at startup, reused across requests (matches how main.py's
 # batch mode avoids reloading the detector/classifier per video).
@@ -124,25 +171,28 @@ def _download_video(video_url: str, dest_dir: Path) -> Path:
 
 def _run_recognition_job(job_id: str, video_url: str):
     """Background worker: download the video, run the existing pipeline."""
-    JOBS[job_id]["status"] = "downloading"
+    JOBS[job_id] = {"status": "downloading", "video_url": video_url}
+    _save_job_state(job_id, "recognize", JOBS[job_id])
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"job_{job_id}_"))
 
     try:
         video_path = _download_video(video_url, tmp_dir)
         JOBS[job_id]["status"] = "processing"
+        _save_job_state(job_id, "recognize", JOBS[job_id])
 
         recognizer = get_recognizer()
         output_path = recognizer.process_video(str(video_path))
 
         JOBS[job_id]["status"] = "done"
         JOBS[job_id]["output_path"] = output_path
+        _save_job_state(job_id, "recognize", JOBS[job_id])
 
         if DELETE_OUTPUT_AFTER_PROCESS and output_path:
             try:
-                # remove output file to free disk
                 if os.path.exists(output_path):
                     os.remove(output_path)
                     JOBS[job_id]["output_removed"] = True
+                    _save_job_state(job_id, "recognize", JOBS[job_id])
             except Exception:
                 logger.exception("Failed to remove output for job %s", job_id)
 
@@ -150,9 +200,9 @@ def _run_recognition_job(job_id: str, video_url: str):
         logger.exception("Job %s failed", job_id)
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(exc)
+        _save_job_state(job_id, "recognize", JOBS[job_id])
 
     finally:
-        # Clean up the downloaded video (keep only the processed output).
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -164,18 +214,19 @@ def _run_face_extraction_job(video_url: str, job_id: str):
     # import heavy optional deps lazily so the API can start in dev
     # environments that don't have CV/ML packages installed.
     import cv2
-    JOBS_FACE[job_id] = {"status": "downloading", "results": []}
+    JOBS_FACE[job_id] = {"status": "downloading", "results": [], "face_count": 0}
+    _save_job_state(job_id, "face_extract", JOBS_FACE[job_id])
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"facejob_{job_id}_"))
     try:
         video_path = _download_video(video_url, tmp_dir)
         JOBS_FACE[job_id]["status"] = "processing"
+        _save_job_state(job_id, "face_extract", JOBS_FACE[job_id])
 
-        # Lazy-load the detector so environments that don't install insightface
-        # still can run other endpoints.
         from detection.face_detector import FaceDetector
 
         cfg = Config(CONFIG_PATH)
         paths = PathManager(root_dir=cfg.project.root_dir)
+        faces_db = FacesDatabase(paths.faces_db_file())
         detector = FaceDetector(cfg, paths)
 
         cap = cv2.VideoCapture(str(video_path))
@@ -189,24 +240,56 @@ def _run_face_extraction_job(video_url: str, job_id: str):
                 break
 
             faces = detector.detect(frame)
-            for det in faces:
+            for det_idx, det in enumerate(faces):
                 crop = det.crop(frame)
-                _, buf = cv2.imencode('.jpg', crop)
-                b64_img = base64.b64encode(buf.tobytes()).decode('utf-8')
+                if crop.size == 0:
+                    continue
+                ok, buf = cv2.imencode('.jpg', crop)
+                if not ok:
+                    continue
+                image_blob = buf.tobytes()
+                face_row_id = faces_db.insert_face(
+                    person_id=f"job_{job_id}_face_{frame_idx}_{det_idx}",
+                    track_id=int(frame_idx * 1000 + det_idx),
+                    image_path=None,
+                    image_blob=image_blob,
+                    source_video=str(video_path),
+                    frame_number=frame_idx,
+                    confidence=float(det.confidence),
+                    embedding=det.embedding,
+                    quality_score=0.0,
+                    is_blurry=False,
+                    laplacian_var=0.0,
+                    brightness_ok=True,
+                    mean_brightness=0.0,
+                    pose_ok=True,
+                    yaw=float(det.yaw),
+                    pitch=0.0,
+                    is_low_res=False,
+                    width=int(crop.shape[1]),
+                    height=int(crop.shape[0]),
+                    is_best_face=False,
+                    landmarks=det.landmarks,
+                )
+
                 timestamp_sec = frame_idx / fps
+                b64_img = base64.b64encode(image_blob).decode('utf-8')
                 results.append({
                     "image": f"data:image/jpeg;base64,{b64_img}",
                     "timestamp": round(timestamp_sec, 2),
+                    "db_row_id": face_row_id,
                 })
 
             frame_idx += 1
 
         cap.release()
-        JOBS_FACE[job_id] = {"status": "done", "results": results}
+        JOBS_FACE[job_id] = {"status": "done", "results": results, "face_count": len(results)}
+        _save_job_state(job_id, "face_extract", JOBS_FACE[job_id])
 
     except Exception as exc:
         logger.exception("Face extraction job %s failed", job_id)
-        JOBS_FACE[job_id] = {"status": "error", "message": str(exc)}
+        JOBS_FACE[job_id] = {"status": "error", "message": str(exc), "results": []}
+        _save_job_state(job_id, "face_extract", JOBS_FACE[job_id])
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -223,6 +306,7 @@ def recognize(request: RecognizeRequest, background_tasks: BackgroundTasks):
     to poll via GET /jobs/{job_id}."""
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "queued", "video_url": request.video_url}
+    _save_job_state(job_id, "recognize", JOBS[job_id])
 
     background_tasks.add_task(_run_recognition_job, job_id, request.video_url)
 
@@ -233,7 +317,10 @@ def recognize(request: RecognizeRequest, background_tasks: BackgroundTasks):
 def get_job(job_id: str):
     job = JOBS.get(job_id)
     if job is None:
+        job = _load_job_state(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    JOBS[job_id] = job
     return job
 
 
@@ -244,7 +331,8 @@ def process_url(req: ProcessURLRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Please provide a valid http:// or https:// video URL.")
 
     job_id = uuid.uuid4().hex
-    JOBS_FACE[job_id] = {"status": "queued", "results": []}
+    JOBS_FACE[job_id] = {"status": "queued", "results": [], "face_count": 0}
+    _save_job_state(job_id, "face_extract", JOBS_FACE[job_id])
     background_tasks.add_task(_run_face_extraction_job, req.url, job_id)
     return {"job_id": job_id}
 
@@ -253,7 +341,10 @@ def process_url(req: ProcessURLRequest, background_tasks: BackgroundTasks):
 def status(job_id: str):
     job = JOBS_FACE.get(job_id)
     if job is None:
+        job = _load_job_state(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    JOBS_FACE[job_id] = job
     return job
 
 
