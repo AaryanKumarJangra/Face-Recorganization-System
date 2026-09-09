@@ -1,4 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -346,6 +347,36 @@ def status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     JOBS_FACE[job_id] = job
     return job
+
+
+@app.get("/faces")
+def list_faces(limit: int = 100):
+    db_path = PathManager(root_dir=Path(__file__).resolve().parent).faces_db_file()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, person_id, image_path, source_video, frame_number, created_at FROM faces ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [{
+        "id": row["id"],
+        "person_id": row["person_id"],
+        "image_path": row["image_path"],
+        "source_video": row["source_video"],
+        "frame_number": row["frame_number"],
+        "created_at": row["created_at"],
+    } for row in rows]
+
+
+@app.get("/faces/{row_id}")
+def get_face(row_id: int):
+    db_path = PathManager(root_dir=Path(__file__).resolve().parent).faces_db_file()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT image_blob FROM faces WHERE id = ?", (row_id,)).fetchone()
+    if row is None or row["image_blob"] is None:
+        raise HTTPException(status_code=404, detail="Face not found")
+    return Response(content=row["image_blob"], media_type="image/jpeg")
 
 
 # Serve the built React frontend (if present) from frontend/dist. Placed
