@@ -8,8 +8,9 @@ import shutil
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
-import requests
 import base64
+
+import yt_dlp
 
 from utils.config_loader import Config
 from utils.path_manager import PathManager
@@ -74,49 +75,51 @@ class RecognizeRequest(BaseModel):
 
 def _download_video(video_url: str, dest_dir: Path) -> Path:
     """
-    Download a video from a direct URL to a local temp file, preserving
-    the original filename when possible (video_timestamp.py relies on
-    the CAMID_YYYYMMDD_HHMMSS naming pattern for timestamp parsing).
+    Download a video from any supported URL (direct file, YouTube, Drive,
+    social media, etc.) into a local temp file using yt-dlp, then normalize
+    to a consistent mp4 output when possible so the existing cv2 pipeline
+    can read it without any site-specific logic.
     """
     parsed = urlparse(video_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"Invalid video URL: {video_url}")
 
-    filename = Path(parsed.path).name or f"{uuid.uuid4().hex}.mp4"
-    dest_path = dest_dir / filename
+    out_template = str(dest_dir / f"{uuid.uuid4().hex}.%(ext)s")
+    ydl_opts = {
+        "outtmpl": out_template,
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "restrictfilenames": True,
+        "nocheckcertificate": True,
+    }
 
     try:
-        response = requests.get(
-            video_url,
-            stream=True,
-            timeout=(10, 120),
-            headers={"User-Agent": "FaceRecognitionSystem/1.0"},
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        if response.headers.get("Content-Type", "").split(";")[0].lower() not in {
-            "video/mp4",
-            "video/quicktime",
-            "video/x-matroska",
-            "video/webm",
-            "application/octet-stream",
-            "",
-        } and not filename.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
-            logger.warning(
-                "Downloaded URL %s returned unexpected Content-Type %s; continuing because filename extension is valid.",
-                video_url,
-                response.headers.get("Content-Type"),
-            )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            if info is None:
+                raise RuntimeError(f"yt-dlp did not return metadata for URL '{video_url}'")
+            downloaded_path = Path(ydl.prepare_filename(info))
+            if not downloaded_path.exists():
+                fallback = downloaded_path.with_suffix(".mp4")
+                if not fallback.exists():
+                    candidates = sorted(dest_dir.glob("*"), key=lambda p: p.stat().st_size if p.is_file() else 0, reverse=True)
+                    for candidate in candidates:
+                        if candidate.is_file() and candidate.stat().st_size > 0:
+                            return candidate
+                    raise RuntimeError(f"No video file was downloaded for URL '{video_url}'")
+                downloaded_path = fallback
 
-        with open(dest_path, "wb") as f:
-            shutil.copyfileobj(response.raw, f)
-    except requests.RequestException as exc:
+            if not downloaded_path.exists() or downloaded_path.stat().st_size == 0:
+                raise RuntimeError(f"Video download produced an empty file for URL '{video_url}'")
+
+            return downloaded_path
+    except yt_dlp.utils.DownloadError as exc:
         raise RuntimeError(f"Failed to download video URL '{video_url}': {exc}") from exc
-
-    if not dest_path.exists() or dest_path.stat().st_size == 0:
-        raise RuntimeError(f"Video download produced an empty file for URL '{video_url}'")
-
-    return dest_path
+    except Exception as exc:
+        raise RuntimeError(f"Failed to process video URL '{video_url}': {exc}") from exc
 
 
 def _run_recognition_job(job_id: str, video_url: str):
