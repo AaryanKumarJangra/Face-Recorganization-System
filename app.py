@@ -79,13 +79,42 @@ def _download_video(video_url: str, dest_dir: Path) -> Path:
     the CAMID_YYYYMMDD_HHMMSS naming pattern for timestamp parsing).
     """
     parsed = urlparse(video_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid video URL: {video_url}")
+
     filename = Path(parsed.path).name or f"{uuid.uuid4().hex}.mp4"
     dest_path = dest_dir / filename
 
-    with requests.get(video_url, stream=True, timeout=30) as r:
-        r.raise_for_status()
+    try:
+        response = requests.get(
+            video_url,
+            stream=True,
+            timeout=(10, 120),
+            headers={"User-Agent": "FaceRecognitionSystem/1.0"},
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        if response.headers.get("Content-Type", "").split(";")[0].lower() not in {
+            "video/mp4",
+            "video/quicktime",
+            "video/x-matroska",
+            "video/webm",
+            "application/octet-stream",
+            "",
+        } and not filename.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
+            logger.warning(
+                "Downloaded URL %s returned unexpected Content-Type %s; continuing because filename extension is valid.",
+                video_url,
+                response.headers.get("Content-Type"),
+            )
+
         with open(dest_path, "wb") as f:
-            shutil.copyfileobj(r.raw, f)
+            shutil.copyfileobj(response.raw, f)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to download video URL '{video_url}': {exc}") from exc
+
+    if not dest_path.exists() or dest_path.stat().st_size == 0:
+        raise RuntimeError(f"Video download produced an empty file for URL '{video_url}'")
 
     return dest_path
 
@@ -207,6 +236,10 @@ def get_job(job_id: str):
 
 @app.post("/process-url")
 def process_url(req: ProcessURLRequest, background_tasks: BackgroundTasks):
+    parsed = urlparse(req.url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Please provide a valid http:// or https:// video URL.")
+
     job_id = uuid.uuid4().hex
     JOBS_FACE[job_id] = {"status": "queued", "results": []}
     background_tasks.add_task(_run_face_extraction_job, req.url, job_id)

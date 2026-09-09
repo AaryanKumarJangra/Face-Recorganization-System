@@ -18,8 +18,13 @@ opencv-python-headless==4.10.0.84
 opencv-contrib-python-headless==4.10.0.84
 
 # --- Deep Learning ---
-torch==2.4.1
-torchvision==0.19.1
+# Project runtime is Python 3.12/3.13/3.14 compatible, but the exact
+# PyTorch wheels differ by interpreter. Pin the new versions for 3.14+ while
+# leaving the legacy 3.12/3.13 pins in place for older environments.
+torch==2.9.0; python_version >= "3.14"
+torch==2.4.1; python_version < "3.14"
+torchvision==0.24.0; python_version >= "3.14"
+torchvision==0.19.1; python_version < "3.14"
 
 # --- Face Detection / Embeddings ---
 # InsightFace (RetinaFace detector + ArcFace embedder). This is the ONLY
@@ -29,8 +34,8 @@ torchvision==0.19.1
 # anywhere in this codebase.
 insightface==0.7.3
 onnx==1.16.2
-onnxruntime==1.19.2          # swap for onnxruntime-gpu if CUDA is available
-# onnxruntime-gpu==1.19.2     # <- uncomment on CUDA machines, comment out the CPU line above
+onnxruntime==1.24.1          # Python 3.14 compatible CPU wheel; swap for GPU if CUDA is available
+# onnxruntime-gpu==1.24.1     # <- uncomment on CUDA machines, comment out the CPU line above
 
 # --- Object Detection (optional YOLO backend, not required by default) ---
 ultralytics==8.2.103
